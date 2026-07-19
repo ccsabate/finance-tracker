@@ -187,7 +187,32 @@ td input:focus, td select:focus{border-color:var(--gold);background:#fff;}
   .mobile-save-row{display:flex;gap:8px;margin-bottom:12px;}
   .mobile-save-row .btn{flex:1;justify-content:center;font-size:12px;padding:9px 8px;}
 }
+
+/* ---------- Sync / connect overlay ---------- */
+.sync-status-line{font-size:11px;color:#D8D4C0;display:flex;align-items:center;gap:6px;}
+.sync-code-display{font-family:'IBM Plex Mono',monospace;color:var(--gold);font-weight:600;letter-spacing:1px;}
+.connect-overlay{display:none;position:fixed;inset:0;z-index:500;background:rgba(31,61,43,0.55);
+  align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(2px);}
+.connect-overlay.show{display:flex;}
+.connect-card{background:var(--card);border-radius:14px;padding:28px 26px;max-width:380px;width:100%;
+  box-shadow:0 20px 50px rgba(0,0,0,0.3);text-align:center;max-height:90vh;overflow-y:auto;}
+.connect-sub{font-size:12.5px;color:var(--muted);margin:8px 0 18px 0;line-height:1.5;}
+.connect-section{margin-bottom:14px;}
+.connect-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin-bottom:8px;}
+.connect-section input{width:100%;margin-bottom:8px;text-align:center;font-size:16px;padding:10px;}
+.connect-section .btn{width:100%;justify-content:center;}
+.connect-divider{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:16px 0;position:relative;}
+.connect-divider::before,.connect-divider::after{content:"";position:absolute;top:50%;width:35%;height:1px;background:var(--line);}
+.connect-divider::before{left:0;} .connect-divider::after{right:0;}
+.connect-error{color:var(--brick);font-size:12px;margin-top:6px;min-height:16px;}
+.sync-code-box{font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:600;letter-spacing:4px;
+  color:var(--ledger);background:var(--gold-soft);border:1px dashed var(--gold);border-radius:8px;
+  padding:14px 10px;margin:12px 0;}
+.connect-card .btn{margin-top:6px;}
 </style>
+<!-- Firebase (for cross-device sync) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div class="app">
@@ -206,7 +231,10 @@ td input:focus, td select:focus{border-color:var(--gold);background:#fff;}
       </label>
       <div class="save-indicator">— unsaved —</div>
     </div>
-    <div class="sidebar-footer">Auto-saves to this browser as you type. Download a backup regularly in case this browser's storage ever gets cleared.</div>
+    <div class="sidebar-footer">
+      <div class="sync-status-line">🔗 Sync Code: <span class="sync-code-display">—</span></div>
+      <button class="btn backup-btn" style="margin-top:8px;" onclick="openSyncPanel()">Manage Sync</button>
+    </div>
   </div>
   <div class="mobile-header">
     <div class="mobile-header-row">
@@ -215,6 +243,7 @@ td input:focus, td select:focus{border-color:var(--gold);background:#fff;}
         <div class="brand-sub">Personal Finance Tracker</div>
       </div>
       <div class="mobile-header-actions">
+        <button class="btn backup-btn mobile-icon-btn" onclick="openSyncPanel()" title="Sync settings">🔗</button>
         <button class="btn save-btn mobile-icon-btn" onclick="manualSave()" title="Save now">💾</button>
         <button class="btn backup-btn mobile-icon-btn" onclick="backupData()" title="Download backup">⬇</button>
         <label class="btn backup-btn mobile-icon-btn" title="Restore from backup">⬆
@@ -227,6 +256,7 @@ td input:focus, td select:focus{border-color:var(--gold);background:#fff;}
   <div class="main" id="main"></div>
   <div class="mobile-tabbar" id="mobile-nav"></div>
   <div class="toast" id="toast"></div>
+  <div class="connect-overlay" id="connect-overlay"><div class="connect-card" id="connect-card"></div></div>
 </div>
 
 <script>
@@ -267,15 +297,213 @@ function defaultState(){
 let state = defaultState();
 let saveStatus = "idle"; // idle | saved | error
 
-function loadState(){
+/* ---------- FIREBASE SETUP -------------------------------------------------
+   1) Create a free project at https://console.firebase.google.com
+   2) In the project, go to Build → Firestore Database → Create database
+      (choose any region, start in "test mode" is fine to begin with)
+   3) Project settings (gear icon) → General → "Your apps" → Add app → Web
+   4) Copy the firebaseConfig values it gives you into FIREBASE_CONFIG below
+   5) Recommended Firestore rule once it's working (Firestore → Rules):
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /financeTrackers/{code} {
+              allow read, write: if code is string && code.size() == 8;
+            }
+          }
+        }
+      This isn't real authentication — anyone who has your 8-character
+      Sync Code can read/write that one tracker. Keep the code private,
+      the same way you'd treat a shared password.
+---------------------------------------------------------------------------- */
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyCAZLSqJylYoRvQPj_C1scDLbbcXFqf8BU",
+  authDomain: "budget-tracker-28dd7.firebaseapp.com",
+  projectId: "budget-tracker-28dd7",
+  storageBucket: "budget-tracker-28dd7.firebasestorage.app",
+  messagingSenderId: "988472828920",
+  appId: "1:988472828920:web:1a87dcb4fa722901eaac0d",
+  measurementId: "G-4TF9FQHD3L"
+};
+
+const SYNC_CODE_KEY = "ledger_sync_code_v1";
+let db = null;
+let firebaseReady = false;
+let syncCode = null;
+let unsubscribeSnapshot = null;
+let lastPushedJSON = null;
+
+function firebaseConfigured(){
+  return FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY";
+}
+
+function initFirebase(){
+  if (!firebaseConfigured()) { firebaseReady = false; return; }
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw){
-      const parsed = JSON.parse(raw);
-      state = Object.assign(defaultState(), parsed);
-      saveStatus = "saved";
-    }
-  }catch(e){ console.error("Load failed", e); }
+    firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.firestore();
+    try{ db.enablePersistence({synchronizeTabs:true}); }catch(e){ /* ok if unsupported */ }
+    firebaseReady = true;
+  }catch(e){
+    console.error("Firebase init failed", e);
+    firebaseReady = false;
+  }
+}
+
+function docRef(code){ return db.collection("financeTrackers").doc(code); }
+
+function genCode(){
+  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no ambiguous chars
+  let c = "";
+  for (let i=0;i<8;i++) c += chars[Math.floor(Math.random()*chars.length)];
+  return c;
+}
+
+async function startNewTracker(){
+  if (!firebaseReady){ showConnectError(); return; }
+  try{
+    const code = genCode();
+    const fresh = defaultState();
+    await docRef(code).set(fresh);
+    localStorage.setItem(SYNC_CODE_KEY, code);
+    state = fresh;
+    connectToCode(code);
+  }catch(e){
+    console.error(e);
+    showConnectError("Couldn't create a tracker — check your Firestore setup/rules.");
+  }
+}
+
+async function connectExisting(){
+  const input = document.getElementById("connect-code-input");
+  const code = (input.value || "").trim().toUpperCase();
+  if (!code){ showConnectError("Enter a sync code first."); return; }
+  if (!firebaseReady){ showConnectError(); return; }
+  try{
+    const snap = await docRef(code).get();
+    if (!snap.exists){ showConnectError("No tracker found with that code — double-check it."); return; }
+    localStorage.setItem(SYNC_CODE_KEY, code);
+    state = Object.assign(defaultState(), snap.data());
+    connectToCode(code);
+  }catch(e){
+    console.error(e);
+    showConnectError("Couldn't reach the sync server. Check your connection and try again.");
+  }
+}
+
+function showConnectError(msg){
+  const el = document.getElementById("connect-error");
+  if (!el) return;
+  el.textContent = msg || "Sync isn't set up yet — open this file and follow the Firebase setup notes near the top of the <script> tag.";
+}
+
+function connectToCode(code){
+  syncCode = code;
+  subscribeToDoc();
+  render();
+  renderConnectOverlay();
+  document.getElementById("connect-overlay").classList.remove("show");
+  updateSyncCodeDisplay();
+  saveStatus = "saved";
+  updateSaveIndicator();
+}
+
+function subscribeToDoc(){
+  if (unsubscribeSnapshot) unsubscribeSnapshot();
+  unsubscribeSnapshot = docRef(syncCode).onSnapshot(snap => {
+    if (!snap.exists) return;
+    const data = snap.data();
+    const json = JSON.stringify(data);
+    if (json === lastPushedJSON) return; // ignore the echo of our own write
+    state = Object.assign(defaultState(), data);
+    render();
+    saveStatus = "saved";
+    updateSaveIndicator();
+  }, err => {
+    console.error("Sync listener error", err);
+    saveStatus = "error";
+    updateSaveIndicator();
+  });
+}
+
+function updateSyncCodeDisplay(){
+  document.querySelectorAll(".sync-code-display").forEach(el=>{ el.textContent = syncCode || "—"; });
+}
+
+function disconnectSync(){
+  if (unsubscribeSnapshot) unsubscribeSnapshot();
+  localStorage.removeItem(SYNC_CODE_KEY);
+  syncCode = null;
+  state = defaultState();
+  render();
+  renderConnectOverlay();
+  document.getElementById("connect-overlay").classList.add("show");
+  updateSyncCodeDisplay();
+}
+
+function copySyncCode(){
+  if (!syncCode) return;
+  navigator.clipboard.writeText(syncCode).then(()=> showToast_(false, "Sync code copied")).catch(()=>{});
+}
+
+function openSyncPanel(){
+  renderConnectOverlay();
+  document.getElementById("connect-overlay").classList.add("show");
+}
+function closeSyncPanel(){
+  if (!syncCode) return; // must be connected to dismiss
+  document.getElementById("connect-overlay").classList.remove("show");
+}
+
+function renderConnectOverlay(){
+  const card = document.getElementById("connect-card");
+  if (!card) return;
+  const setupWarning = !firebaseConfigured()
+    ? `<div class="connect-error" style="margin-bottom:10px;">⚠ Sync isn't configured yet. Open this file and fill in FIREBASE_CONFIG near the top of the &lt;script&gt; tag — setup steps are in the comment right above it.</div>` : "";
+  if (!syncCode){
+    card.innerHTML = `
+      <div class="brand-title" style="color:var(--ledger);font-size:20px;">Ledger &amp; Goal</div>
+      <div class="connect-sub">Connect this device to sync your data across your phone, laptop, and anywhere else you open this link.</div>
+      ${setupWarning}
+      <div class="connect-section">
+        <div class="connect-label">New here?</div>
+        <button class="btn save-btn" onclick="startNewTracker()">✨ Create a New Tracker</button>
+      </div>
+      <div class="connect-divider">or connect to an existing one</div>
+      <div class="connect-section">
+        <input type="text" id="connect-code-input" placeholder="Enter your Sync Code" maxlength="8">
+        <button class="btn secondary" onclick="connectExisting()">Connect</button>
+      </div>
+      <div class="connect-error" id="connect-error"></div>
+    `;
+  } else {
+    card.innerHTML = `
+      <div class="brand-title" style="color:var(--ledger);font-size:20px;">Synced ✓</div>
+      <div class="connect-sub">This device is connected. Enter this same code on any other device to see the same data everywhere.</div>
+      <div class="sync-code-box">${syncCode}</div>
+      <button class="btn secondary" onclick="copySyncCode()">Copy Sync Code</button>
+      <div class="connect-divider">Switch to a different tracker</div>
+      <div class="connect-section">
+        <input type="text" id="connect-code-input" placeholder="Enter a different Sync Code" maxlength="8">
+        <button class="btn secondary" onclick="connectExisting()">Switch</button>
+      </div>
+      <div class="connect-error" id="connect-error"></div>
+      <button class="btn backup-btn" onclick="closeSyncPanel()">Close</button>
+      <button class="btn danger" style="width:100%;justify-content:center;padding:8px;" onclick="disconnectSync()">Disconnect this device</button>
+    `;
+  }
+}
+
+function loadState(){
+  initFirebase();
+  renderConnectOverlay();
+  const savedCode = localStorage.getItem(SYNC_CODE_KEY);
+  if (savedCode && firebaseReady){
+    connectToCode(savedCode);
+  } else {
+    document.getElementById("connect-overlay").classList.add("show");
+  }
   render();
   updateSaveIndicator();
 }
@@ -283,21 +511,31 @@ function loadState(){
 let saveTimer = null;
 function saveState(){
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { commitSave(); }, 250);
+  saveTimer = setTimeout(() => { commitSave(false); }, 400);
 }
 
 function commitSave(showToast){
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    saveStatus = "saved";
-    if (showToast) showToast_();
-    updateSaveIndicator();
-  }catch(e){
-    console.error("Save failed", e);
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){ /* best-effort local cache */ }
+  if (!syncCode || !db){
     saveStatus = "error";
     updateSaveIndicator();
-    if (showToast) showToast_(true);
+    if (showToast) showToast_(true, "Not connected — tap 🔗 Manage Sync first.");
+    return;
   }
+  const json = JSON.stringify(state);
+  lastPushedJSON = json;
+  docRef(syncCode).set(state)
+    .then(()=>{
+      saveStatus = "saved";
+      updateSaveIndicator();
+      if (showToast) showToast_(false, "✓ Synced");
+    })
+    .catch(e=>{
+      console.error("Save failed", e);
+      saveStatus = "error";
+      updateSaveIndicator();
+      if (showToast) showToast_(true, "⚠ Couldn't sync — check your connection");
+    });
 }
 
 function manualSave(){
@@ -305,10 +543,10 @@ function manualSave(){
   commitSave(true);
 }
 
-function showToast_(isError){
+function showToast_(isError, message){
   const t = document.getElementById("toast");
   if (!t) return;
-  t.textContent = isError ? "⚠ Could not save — your browser may be blocking local storage." : "✓ Saved";
+  t.textContent = message || (isError ? "⚠ Something went wrong." : "✓ Saved");
   t.className = "toast show" + (isError ? " error" : "");
   clearTimeout(showToast_.timer);
   showToast_.timer = setTimeout(()=>{ t.className = "toast"; }, 2200);
@@ -316,11 +554,11 @@ function showToast_(isError){
 
 function updateSaveIndicator(){
   document.querySelectorAll(".save-indicator").forEach(el=>{
-    el.textContent = saveStatus==="saved" ? "All changes saved" : (saveStatus==="error" ? "Save failed — use Backup" : "");
+    el.textContent = saveStatus==="saved" ? "All changes synced" : (saveStatus==="error" ? "Not synced — tap 🔗" : "");
   });
 }
 
-/* ---------- Backup / Restore (extra safety net beyond localStorage) ---------- */
+/* ---------- Backup / Restore (extra safety net beyond cloud sync) ---------- */
 function backupData(){
   const blob = new Blob([JSON.stringify(state, null, 2)], {type:"application/json"});
   const url = URL.createObjectURL(blob);
