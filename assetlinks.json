@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "io.github.ccsabate.twa",
+        "sha256_cert_fingerprints": ["71:64:60:6B:2F:84:8D:40:CA:C9:34:B9:17:67:0C:0D:CE:2B:EA:78:A7:47:E7:EF:3E:83:1A:70:EC:DF:10:55"]
+      }
+    }]
